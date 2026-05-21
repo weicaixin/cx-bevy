@@ -26,7 +26,7 @@ use bevy_render::{
         CommandEncoderDescriptor, LoadOp, Operations, RenderPassColorAttachment,
         RenderPassDescriptor, StoreOp,
     },
-    renderer::{CurrentView, PendingCommandBuffers, RenderDevice, RenderQueue},
+    renderer::{CurrentView, ExternalFrameBuffers, PendingCommandBuffers, RenderDevice, RenderQueue},
     view::ExtractedWindows,
 };
 
@@ -232,10 +232,16 @@ pub(crate) fn submit_pending_command_buffers(world: &mut World) {
     let buffers = pending.take();
 
     if !buffers.is_empty() {
-        #[cfg(feature = "trace")]
-        let _span = info_span!("queue_submit", count = buffer_count).entered();
-        let queue = world.resource::<RenderQueue>();
-        queue.submit(buffers);
+        // When an external frame collector is present, accumulate buffers for
+        // the host (cx3d) to submit in a single batch alongside the UI pass.
+        if let Some(mut external) = world.get_resource_mut::<ExternalFrameBuffers>() {
+            external.0.extend(buffers);
+        } else {
+            #[cfg(feature = "trace")]
+            let _span = info_span!("queue_submit", count = buffer_count).entered();
+            let queue = world.resource::<RenderQueue>();
+            queue.submit(buffers);
+        }
     }
 }
 

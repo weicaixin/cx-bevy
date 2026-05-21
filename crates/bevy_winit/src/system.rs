@@ -7,19 +7,21 @@ use bevy_ecs::{
     lifecycle::RemovedComponents,
     message::MessageWriter,
     prelude::{Changed, Commands, Component},
-    system::{Local, NonSendMarker, Query, SystemParamItem},
+    system::{Local, NonSendMarker, Query, SystemParamItem, SystemState},
+    world::World,
 };
 use bevy_input::keyboard::{Key, KeyCode, KeyboardFocusLost, KeyboardInput};
 use bevy_window::{
-    ClosingWindow, CursorOptions, Monitor, OnMonitor, PrimaryMonitor, RawHandleWrapper, VideoMode,
-    Window, WindowClosed, WindowClosing, WindowCreated, WindowEvent, WindowFocused, WindowMode,
-    WindowResized, WindowWrapper,
+    ClosingWindow, CursorOptions, Monitor, OnMonitor, PrimaryMonitor, RawHandleWrapper,
+    RawHandleWrapperHolder, VideoMode, Window, WindowClosed, WindowClosing, WindowCreated,
+    WindowEvent, WindowFocused, WindowMode, WindowResized, WindowWrapper,
 };
 use tracing::{error, info, warn};
 
 use winit::{
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     event_loop::ActiveEventLoop,
+    window::Window as WinitWindow,
 };
 
 use crate::{
@@ -126,6 +128,96 @@ pub fn create_windows(
             }
         });
     });
+}
+
+/// Registers a `winit` window created by an external event loop owner.
+///
+/// This mirrors the Bevy-side state inserted by [`create_windows`] without
+/// calling [`ActiveEventLoop::create_window`].
+pub fn register_external_window(
+    commands: &mut Commands,
+    entity: Entity,
+    window: &mut Window,
+    cursor_options: &CursorOptions,
+    handle_holder: Option<&RawHandleWrapperHolder>,
+    winit_window: WinitWindow,
+    window_created_events: &mut MessageWriter<WindowCreated>,
+) {
+    WINIT_WINDOWS.with_borrow_mut(|winit_windows| {
+        let winit_window = winit_windows.insert_window(entity, winit_window);
+
+        if let Some(theme) = winit_window.theme() {
+            window.window_theme = Some(convert_winit_theme(theme));
+        }
+
+        let size = winit_window.inner_size();
+        window
+            .resolution
+            .set_scale_factor(winit_window.scale_factor() as f32);
+        window
+            .resolution
+            .set_physical_resolution(size.width, size.height);
+
+        commands.entity(entity).insert((
+            CachedWindow(window.clone()),
+            CachedCursorOptions(cursor_options.clone()),
+            WinitWindowPressedKeys::default(),
+        ));
+
+        if let Ok(handle_wrapper) = RawHandleWrapper::new(winit_window) {
+            commands.entity(entity).insert(handle_wrapper.clone());
+            if let Some(handle_holder) = handle_holder {
+                *handle_holder.0.lock().unwrap() = Some(handle_wrapper);
+            }
+        }
+
+        window_created_events.write(WindowCreated { window: entity });
+    });
+}
+
+/// Registers a `winit` window created by an external event loop owner.
+///
+/// Returns `false` if `entity` does not have the required Bevy window
+/// components.
+pub fn register_external_window_with_world(
+    world: &mut World,
+    entity: Entity,
+    winit_window: WinitWindow,
+) -> bool {
+    let mut system_state = SystemState::<(
+        Commands,
+        Query<(
+            Entity,
+            &mut Window,
+            &CursorOptions,
+            Option<&RawHandleWrapperHolder>,
+        )>,
+        MessageWriter<WindowCreated>,
+    )>::new(world);
+
+    let (mut commands, mut windows, mut window_created_events) =
+        system_state.get_mut(world).unwrap();
+    let Ok((entity, mut window, cursor_options, handle_holder)) = windows.get_mut(entity) else {
+        return false;
+    };
+
+    register_external_window(
+        &mut commands,
+        entity,
+        &mut window,
+        cursor_options,
+        handle_holder,
+        winit_window,
+        &mut window_created_events,
+    );
+    system_state.apply(world);
+
+    true
+}
+
+/// Requests a redraw for an externally registered winit window.
+pub fn request_redraw(entity: Entity) -> bool {
+    WINIT_WINDOWS.with_borrow(|winit_windows| winit_windows.request_redraw(entity))
 }
 
 /// Check whether keyboard focus was lost. This is different from window

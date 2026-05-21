@@ -334,11 +334,23 @@ impl WinitWindows {
             );
         }
 
-        self.entity_to_winit.insert(entity, winit_window.id());
-        self.winit_to_entity.insert(winit_window.id(), entity);
+        self.insert_window(entity, winit_window)
+    }
+
+    /// Associates an externally-created `winit` window with a Bevy window
+    /// entity.
+    pub fn insert_window(
+        &mut self,
+        entity: Entity,
+        winit_window: WinitWindow,
+    ) -> &WindowWrapper<WinitWindow> {
+        let winit_id = winit_window.id();
+
+        self.entity_to_winit.insert(entity, winit_id);
+        self.winit_to_entity.insert(winit_id, entity);
 
         self.windows
-            .entry(winit_window.id())
+            .entry(winit_id)
             .insert(WindowWrapper::new(winit_window))
             .into_mut()
     }
@@ -355,6 +367,16 @@ impl WinitWindows {
     /// This is mostly just an intermediary step between us and winit.
     pub fn get_window_entity(&self, winit_id: WindowId) -> Option<Entity> {
         self.winit_to_entity.get(&winit_id).cloned()
+    }
+
+    /// Requests a redraw for the winit window associated with `entity`.
+    pub fn request_redraw(&self, entity: Entity) -> bool {
+        let Some(window) = self.get_window(entity) else {
+            return false;
+        };
+
+        window.request_redraw();
+        true
     }
 
     /// Remove a window from winit.

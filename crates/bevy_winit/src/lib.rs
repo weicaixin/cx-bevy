@@ -18,14 +18,20 @@ use bevy_derive::Deref;
 use bevy_reflect::Reflect;
 use bevy_window::{ExitSystems, RawHandleWrapperHolder, WindowEvent};
 use core::cell::RefCell;
-use winit::{event_loop::EventLoop, window::WindowId};
+use winit::{
+    event_loop::{EventLoop, OwnedDisplayHandle},
+    window::WindowId,
+};
 
 use bevy_a11y::AccessibilityRequested;
 use bevy_app::{App, Last, Plugin};
 use bevy_ecs::prelude::*;
 use bevy_window::{CursorOptions, Window, WindowCreated};
 use system::{changed_cursor_options, changed_windows, check_keyboard_focus_lost, despawn_windows};
-pub use system::{create_monitors, create_windows};
+pub use system::{
+    create_monitors, create_windows, register_external_window, register_external_window_with_world,
+    request_redraw,
+};
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 pub use winit::platform::web::CustomCursorExtWebSys;
 pub use winit::{
@@ -40,6 +46,8 @@ use crate::{
     accessibility::{AccessKitPlugin, WinitActionRequestHandlers},
     state::winit_runner,
 };
+
+pub use state::WinitAppRunnerState;
 
 pub mod accessibility;
 pub mod converters;
@@ -127,34 +135,91 @@ impl Plugin for WinitPlugin {
             .build()
             .expect("Failed to build event loop");
 
-        app.init_resource::<WinitMonitors>()
-            .init_resource::<WinitSettings>()
-            .insert_resource(DisplayHandleWrapper(event_loop.owned_display_handle()))
-            .insert_resource(EventLoopProxyWrapper(event_loop.create_proxy()))
-            .add_message::<RawWinitWindowEvent>()
-            .set_runner(|app| winit_runner(app, event_loop))
-            .add_systems(
-                Last,
-                (
-                    changed_windows,
-                    changed_cursor_options,
-                    despawn_windows.after(ExitSystems),
-                    check_keyboard_focus_lost,
-                )
-                    .chain(),
-            );
+        app.insert_resource(DisplayHandleWrapper(event_loop.owned_display_handle()))
+            .insert_resource(EventLoopProxyWrapper::new(event_loop.create_proxy()));
 
-        app.add_plugins(AccessKitPlugin);
-        app.add_plugins(cursor::WinitCursorPlugin);
+        add_winit_systems(app);
+        add_window_added_observer(app);
 
-        app.add_observer(
-            |_window: On<Add, Window>, event_loop_proxy: Res<EventLoopProxyWrapper>| -> Result {
-                event_loop_proxy.send_event(WinitUserEvent::WindowAdded)?;
-
-                Ok(())
-            },
-        );
+        app.set_runner(|app| winit_runner(app, event_loop));
     }
+}
+
+/// A [`Plugin`] that installs Bevy's `winit` systems without owning the
+/// `winit` event loop.
+///
+/// Use this when another host owns window creation and drives
+/// [`winit::application::ApplicationHandler`] callbacks. The host is
+/// responsible for forwarding events into [`WinitAppRunnerState`] and
+/// registering any externally-created windows.
+pub struct ExternalWinitPlugin {
+    /// The display handle from the host-owned event loop.
+    pub display_handle: OwnedDisplayHandle,
+    /// Optional proxy for sending Bevy's `winit` user events to the host-owned
+    /// event loop.
+    pub event_loop_proxy: Option<EventLoopProxy<WinitUserEvent>>,
+}
+
+impl ExternalWinitPlugin {
+    /// Creates an external `winit` plugin without an event loop proxy.
+    pub fn new(display_handle: OwnedDisplayHandle) -> Self {
+        Self {
+            display_handle,
+            event_loop_proxy: None,
+        }
+    }
+
+    /// Provides the event loop proxy used to wake the host-owned loop.
+    pub fn with_event_loop_proxy(mut self, proxy: EventLoopProxy<WinitUserEvent>) -> Self {
+        self.event_loop_proxy = Some(proxy);
+        self
+    }
+}
+
+impl Plugin for ExternalWinitPlugin {
+    fn name(&self) -> &str {
+        "bevy_winit::ExternalWinitPlugin"
+    }
+
+    fn build(&self, app: &mut App) {
+        app.insert_resource(DisplayHandleWrapper(self.display_handle.clone()));
+
+        if let Some(proxy) = &self.event_loop_proxy {
+            app.insert_resource(EventLoopProxyWrapper::new(proxy.clone()));
+            add_window_added_observer(app);
+        }
+
+        add_winit_systems(app);
+    }
+}
+
+fn add_winit_systems(app: &mut App) {
+    app.init_resource::<WinitMonitors>()
+        .init_resource::<WinitSettings>()
+        .add_message::<RawWinitWindowEvent>()
+        .add_systems(
+            Last,
+            (
+                changed_windows,
+                changed_cursor_options,
+                despawn_windows.after(ExitSystems),
+                check_keyboard_focus_lost,
+            )
+                .chain(),
+        );
+
+    app.add_plugins(AccessKitPlugin);
+    app.add_plugins(cursor::WinitCursorPlugin);
+}
+
+fn add_window_added_observer(app: &mut App) {
+    app.add_observer(
+        |_window: On<Add, Window>, event_loop_proxy: Res<EventLoopProxyWrapper>| -> Result {
+            event_loop_proxy.send_event(WinitUserEvent::WindowAdded)?;
+
+            Ok(())
+        },
+    );
 }
 
 /// Events that can be sent to perform actions inside the winit event loop.
@@ -205,6 +270,13 @@ pub struct RawWinitWindowEvent {
 #[derive(Resource, Deref)]
 pub struct EventLoopProxyWrapper(EventLoopProxy<WinitUserEvent>);
 
+impl EventLoopProxyWrapper {
+    /// Creates a wrapper around a `winit` event loop proxy.
+    pub fn new(proxy: EventLoopProxy<WinitUserEvent>) -> Self {
+        Self(proxy)
+    }
+}
+
 /// A wrapper around [`winit::event_loop::OwnedDisplayHandle`]
 ///
 /// The `DisplayHandleWrapper` can be used to build integrations that rely on direct
@@ -212,7 +284,7 @@ pub struct EventLoopProxyWrapper(EventLoopProxy<WinitUserEvent>);
 ///
 /// Use `Res<DisplayHandleWrapper>` to receive this resource.
 #[derive(Resource, Deref)]
-pub struct DisplayHandleWrapper(pub winit::event_loop::OwnedDisplayHandle);
+pub struct DisplayHandleWrapper(pub OwnedDisplayHandle);
 
 trait AppSendEvent {
     fn send(&mut self, event: impl Into<WindowEvent>);

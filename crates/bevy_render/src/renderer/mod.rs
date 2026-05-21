@@ -7,6 +7,12 @@ mod wgpu_wrapper;
 pub use render_context::{
     CurrentView, FlushCommands, PendingCommandBuffers, RenderContext, RenderContextState, ViewQuery,
 };
+
+/// Resource that, when present, signals the renderer to collect command buffers
+/// for external submission instead of submitting to the queue directly.
+/// The `Vec<CommandBuffer>` accumulates finished command buffers each frame.
+#[derive(Resource, Default)]
+pub struct ExternalFrameBuffers(pub Vec<wgpu::CommandBuffer>);
 pub use render_device::*;
 pub use wgpu_wrapper::WgpuWrapper;
 
@@ -75,9 +81,12 @@ pub fn render_system(
 
     world.run_schedule(RenderGraph);
 
+    // When an external frame collector is present, skip the internal screenshot
+    // submission — the host (cx3d) will submit all command buffers together.
+    let use_external = world.contains_resource::<ExternalFrameBuffers>();
+
     {
         let render_device = world.resource::<RenderDevice>();
-        let render_queue = world.resource::<RenderQueue>();
 
         let mut encoder =
             render_device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -85,7 +94,15 @@ pub fn render_system(
         crate::view::screenshot::submit_screenshot_commands(world, &mut encoder);
         crate::gpu_readback::submit_readback_commands(world, &mut encoder);
 
-        render_queue.submit([encoder.finish()]);
+        if use_external {
+            world
+                .resource_mut::<ExternalFrameBuffers>()
+                .0
+                .push(encoder.finish());
+        } else {
+            let render_queue = world.resource::<RenderQueue>();
+            render_queue.submit([encoder.finish()]);
+        }
     }
 
     {

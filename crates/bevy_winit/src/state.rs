@@ -48,7 +48,7 @@ use crate::{
 
 /// Persistent state that is used to run the [`App`] according to the current
 /// [`UpdateMode`].
-pub(crate) struct WinitAppRunnerState {
+pub struct WinitAppRunnerState {
     /// The running app.
     app: App,
     /// Exit value once the loop is finished.
@@ -95,7 +95,14 @@ pub(crate) struct WinitAppRunnerState {
 }
 
 impl WinitAppRunnerState {
-    fn new(mut app: App) -> Self {
+    /// Creates a Bevy `winit` runner state that can be driven by an external
+    /// event loop owner.
+    pub fn new(mut app: App) -> Self {
+        if app.plugins_state() == PluginsState::Ready {
+            app.finish();
+            app.cleanup();
+        }
+
         let windows_system_state: SystemState<
             Query<(&mut Window, &mut CachedWindow, &mut WinitWindowPressedKeys)>,
         > = SystemState::new(app.world_mut());
@@ -127,11 +134,13 @@ impl WinitAppRunnerState {
         self.user_event_received = false;
     }
 
-    fn world(&self) -> &World {
+    /// Returns the wrapped Bevy [`World`].
+    pub fn world(&self) -> &World {
         self.app.world()
     }
 
-    pub(crate) fn world_mut(&mut self) -> &mut World {
+    /// Returns the wrapped Bevy [`World`] mutably.
+    pub fn world_mut(&mut self) -> &mut World {
         self.app.world_mut()
     }
 }
@@ -882,12 +891,7 @@ impl WinitAppRunnerState {
 ///
 /// Overriding the app's [runner](bevy_app::App::runner) while using `WinitPlugin` will bypass the
 /// `EventLoop`.
-pub fn winit_runner(mut app: App, event_loop: EventLoop<WinitUserEvent>) -> AppExit {
-    if app.plugins_state() == PluginsState::Ready {
-        app.finish();
-        app.cleanup();
-    }
-
+pub fn winit_runner(app: App, event_loop: EventLoop<WinitUserEvent>) -> AppExit {
     let runner_state = WinitAppRunnerState::new(app);
 
     trace!("starting winit event loop");

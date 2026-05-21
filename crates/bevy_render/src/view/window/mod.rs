@@ -214,6 +214,28 @@ pub struct WindowSurfaces {
 }
 
 impl WindowSurfaces {
+    /// Inserts a surface that was created by an external integration owner.
+    ///
+    /// This lets hosts share WGPU device and surface ownership with Bevy while
+    /// still using Bevy's normal swapchain frame preparation.
+    pub fn insert_external_surface(
+        &mut self,
+        window: Entity,
+        surface: wgpu::Surface<'static>,
+        configuration: SurfaceConfiguration,
+        texture_view_format: Option<TextureFormat>,
+    ) {
+        self.surfaces.insert(
+            window,
+            SurfaceData {
+                surface: WgpuWrapper::new(surface),
+                configuration,
+                texture_view_format,
+            },
+        );
+        self.configured_windows.insert(window);
+    }
+
     fn remove(&mut self, window: &Entity) {
         self.surfaces.remove(window);
         self.configured_windows.remove(window);
